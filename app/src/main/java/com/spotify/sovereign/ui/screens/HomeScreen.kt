@@ -22,6 +22,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cast
+import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
@@ -62,6 +64,7 @@ fun HomeScreen(
     state: SovereignUiState,
     onOpenProfile: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenCast: () -> Unit,
     onSelectFilter: (HomeFilter) -> Unit,
     onSelectMusicMood: (MusicMoodCategory) -> Unit,
     onClickCollection: (CollectionItem) -> Unit,
@@ -142,6 +145,25 @@ fun HomeScreen(
                 }
 
                 Spacer(Modifier.weight(1f))
+
+                // 1-Tap Cast to Xiaomi TV Button
+                val isCasting = state.activeCastTv != null
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(if (isCasting) palette.accent.copy(alpha = 0.22f) else palette.glassSurface)
+                        .border(1.dp, if (isCasting) palette.accent else palette.glassBorder, CircleShape)
+                        .clickable(onClick = onOpenCast),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = if (isCasting) Icons.Filled.CastConnected else Icons.Filled.Cast,
+                        contentDescription = "Cast to TV",
+                        tint = if (isCasting) palette.accent else palette.textPrimary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
 
                 // 1-Tap Settings & Theme Studio Gear
                 Box(
@@ -253,9 +275,10 @@ private fun MusicSongsFeed(
 ) {
     val palette = SovereignTheme.colors
 
-    // Harvest & organize pure deduplicated songs from Taste AI shelves + recents + likes + selected mood
-    val allShelfTracks = remember(state.homeShelves, state.quickPicks) {
-        (state.homeShelves.flatMap { it.items.flatMap { c -> c.tracks } } +
+    // Harvest & strictly deduplicate EVERY song across sections so ZERO song ever repeats on the Music tab!
+    val allShelfTracks = remember(state.homeShelves, state.quickPicks, state.musicFreshTracks) {
+        (state.musicFreshTracks +
+            state.homeShelves.flatMap { it.items.flatMap { c -> c.tracks } } +
             state.quickPicks.flatMap { it.tracks })
             .distinctBy { it.id }
     }
@@ -263,73 +286,62 @@ private fun MusicSongsFeed(
     val selectedMood = state.selectedMusicMood
     val moodTracks = state.moodSongsMap[selectedMood].orEmpty()
 
-    val quickPlayPool = remember(selectedMood, moodTracks, allShelfTracks, state.recentTracks, state.likedTracks) {
-        if (selectedMood != MusicMoodCategory.FOR_YOU && moodTracks.isNotEmpty()) {
-            moodTracks
-        } else {
-            (state.recentTracks.take(6) + allShelfTracks + state.likedTracks).distinctBy { it.id }
+    val (spotlightTrack, quickPlayPool, categoryBlocks) = remember(
+        selectedMood,
+        moodTracks,
+        allShelfTracks,
+        state.likedTracks,
+        state.recentTracks,
+        state.tasteDna.currentTimeBucket,
+    ) {
+        val used = HashSet<String>()
+        fun takeUnique(source: List<TrackItem>, limit: Int): List<TrackItem> {
+            val picked = ArrayList<TrackItem>(limit)
+            for (t in source) {
+                if (picked.size >= limit) break
+                if (used.add(t.id)) picked.add(t)
+            }
+            return picked
         }
-    }
 
-    val spotlightTrack = quickPlayPool.firstOrNull()
-
-    val categoryBlocks = remember(selectedMood, moodTracks, allShelfTracks, state.likedTracks, state.recentTracks, state.tasteDna.currentTimeBucket) {
         if (selectedMood != MusicMoodCategory.FOR_YOU) {
-            listOfNotNull(
-                moodTracks.takeIf { it.isNotEmpty() }?.let {
+            val spot = moodTracks.firstOrNull()?.also { used.add(it.id) }
+            val quick = takeUnique(moodTracks, 12)
+            val rest = takeUnique(moodTracks, 20)
+            val blocks = listOfNotNull(
+                rest.takeIf { it.isNotEmpty() }?.let {
                     SongCategoryBlock(
                         id = "mood_${selectedMood.name}",
-                        title = "${selectedMood.label} Cuts",
-                        subtitle = "Pure studio tracks tuned for ${selectedMood.label.lowercase()}",
+                        title = "More ${selectedMood.label} Cuts",
+                        subtitle = "Zero duplicates · fresh studio picks",
                         songs = it,
                     )
                 }
             )
+            Triple(spot, quick, blocks)
         } else {
-            buildList {
-                if (state.recentTracks.isNotEmpty()) {
-                    add(
-                        SongCategoryBlock(
-                            id = "cat_repeat",
-                            title = "On Repeat · Jump Back In",
-                            subtitle = "Songs you keep spinning",
-                            songs = state.recentTracks.distinctBy { it.id }.take(8),
-                        )
-                    )
+            val spot = (allShelfTracks.firstOrNull() ?: state.recentTracks.firstOrNull())?.also { used.add(it.id) }
+            // Quick Play gets 12 fresh tracks first (disjoint from below!)
+            val quick = takeUnique(allShelfTracks, 12)
+            val blocks = buildList {
+                val repeat = takeUnique(state.recentTracks, 6)
+                if (repeat.isNotEmpty()) {
+                    add(SongCategoryBlock("cat_repeat", "Jump Back In", "Your recent rotation", repeat))
                 }
-                if (state.likedTracks.isNotEmpty()) {
-                    add(
-                        SongCategoryBlock(
-                            id = "cat_liked",
-                            title = "Liked Songs",
-                            subtitle = "${state.likedTracks.size} saved favorites",
-                            songs = state.likedTracks.take(10),
-                        )
-                    )
+                val liked = takeUnique(state.likedTracks, 8)
+                if (liked.isNotEmpty()) {
+                    add(SongCategoryBlock("cat_liked", "From Your Likes", "${state.likedTracks.size} saved favorites", liked))
                 }
-                // Group AI shelf tracks by artist/vibe chunks
-                val fresh = allShelfTracks.filterNot { t -> state.recentTracks.any { it.id == t.id } }
-                if (fresh.isNotEmpty()) {
-                    add(
-                        SongCategoryBlock(
-                            id = "cat_vibe",
-                            title = "${state.tasteDna.currentTimeBucket} Vibe Picks",
-                            subtitle = "Hand-picked songs matching your current energy",
-                            songs = fresh.take(10),
-                        )
-                    )
+                val vibe = takeUnique(allShelfTracks, 10)
+                if (vibe.isNotEmpty()) {
+                    add(SongCategoryBlock("cat_vibe", "${state.tasteDna.currentTimeBucket} Vibe Picks", "Fresh unique tracks for right now", vibe))
                 }
-                if (fresh.size > 10) {
-                    add(
-                        SongCategoryBlock(
-                            id = "cat_deep",
-                            title = "Deep Cuts & Fresh Drops",
-                            subtitle = "Expand your rotation",
-                            songs = fresh.drop(10).take(12),
-                        )
-                    )
+                val deep = takeUnique(allShelfTracks, 12)
+                if (deep.isNotEmpty()) {
+                    add(SongCategoryBlock("cat_deep", "Deep Cuts & Discovery", "New tracks you haven't spun yet", deep))
                 }
             }
+            Triple(spot, quick, blocks)
         }
     }
 

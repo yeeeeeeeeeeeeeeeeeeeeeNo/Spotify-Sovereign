@@ -41,6 +41,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.Cast
+import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lyrics
@@ -103,6 +105,7 @@ fun NowPlayingSheet(
     onOpenQueue: () -> Unit,
     onOpenFullLyrics: () -> Unit,
     onOpenSoundFx: () -> Unit,
+    onOpenCast: () -> Unit,
     onCycleArtworkStyle: () -> Unit,
 ) {
     val track = state.currentTrack ?: return
@@ -195,19 +198,59 @@ fun NowPlayingSheet(
                         .background(Color.White.copy(alpha = 0.28f))
                 )
 
-                // Clean Minimal Sound FX Icon (Zero text/pill clutter)
-                IconButton(
-                    onClick = {
-                        if (visual.hapticFeedback) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        onOpenSoundFx()
-                    },
-                    modifier = Modifier.size(38.dp),
+                // Clean Minimal Cast + Sound FX Icons (Zero text/pill clutter)
+                val isCasting = state.activeCastTv != null
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    IconButton(
+                        onClick = {
+                            if (visual.hapticFeedback) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onOpenCast()
+                        },
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = if (isCasting) Icons.Filled.CastConnected else Icons.Filled.Cast,
+                            contentDescription = "Cast to TV",
+                            tint = if (isCasting) palette.accent else Color.White.copy(alpha = 0.80f),
+                            modifier = Modifier.size(21.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            if (visual.hapticFeedback) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onOpenSoundFx()
+                        },
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.GraphicEq,
+                            contentDescription = "Sound Engine",
+                            tint = if (audioFx.masterEnabled) palette.accent else Color.White.copy(alpha = 0.78f),
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+            }
+
+            // Sleek Active TV Cast Status Pill (only shown while actively casting!)
+            state.activeCastTv?.let { tv ->
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .clip(CircleShape)
+                        .background(palette.accent.copy(alpha = 0.18f))
+                        .border(1.dp, palette.accent.copy(alpha = 0.50f), CircleShape)
+                        .clickable(onClick = onOpenCast)
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.GraphicEq,
-                        contentDescription = "Sound Engine",
-                        tint = if (audioFx.masterEnabled) palette.accent else Color.White.copy(alpha = 0.78f),
-                        modifier = Modifier.size(22.dp),
+                    Icon(Icons.Filled.CastConnected, contentDescription = null, tint = palette.accent, modifier = Modifier.size(13.dp))
+                    Text(
+                        text = "Casting to ${tv.name}",
+                        color = palette.accent,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
                     )
                 }
             }

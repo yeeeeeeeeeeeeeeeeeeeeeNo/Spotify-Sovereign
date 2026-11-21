@@ -50,6 +50,7 @@ data class DetailPageData(
 data class SearchResults(
     val query: String,
     val songs: List<TrackItem> = emptyList(),
+    val relatedSongs: List<TrackItem> = emptyList(),
     val albums: List<CollectionItem> = emptyList(),
     val artists: List<CollectionItem> = emptyList(),
     val playlists: List<CollectionItem> = emptyList(),

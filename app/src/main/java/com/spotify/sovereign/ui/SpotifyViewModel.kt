@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.graphics.Bitmap
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.Player
@@ -18,7 +19,9 @@ import coil3.toBitmap
 import com.google.common.util.concurrent.MoreExecutors
 import com.spotify.sovereign.ai.TasteBrain
 import com.spotify.sovereign.ai.TasteDatabase
+import com.spotify.sovereign.engine.CastTvDevice
 import com.spotify.sovereign.engine.SovereignAudioEngine
+import com.spotify.sovereign.engine.SovereignCastSender
 import com.spotify.sovereign.engine.SovereignLyricsEngine
 import com.spotify.sovereign.model.AppSettings
 import com.spotify.sovereign.model.AppTab
@@ -107,7 +110,12 @@ data class SovereignUiState(
     val ytAccount: YouTubeAccountProfile = YouTubeAccountProfile(),
     val selectedMusicMood: MusicMoodCategory = MusicMoodCategory.FOR_YOU,
     val moodSongsMap: Map<MusicMoodCategory, List<TrackItem>> = emptyMap(),
+    val musicFreshTracks: List<TrackItem> = emptyList(),
     val isLoadingMusicMood: Boolean = false,
+    val castSheetOpen: Boolean = false,
+    val isScanningTvs: Boolean = false,
+    val discoveredTvs: List<CastTvDevice> = emptyList(),
+    val activeCastTv: CastTvDevice? = null,
     val dominantColor: Color = SpotifyColors.DefaultAccent,
     val miniPlayerColor: Color = SpotifyColors.DefaultMiniBg,
     val lyricsCardColor: Color = Color(0xFF333645),
@@ -132,6 +140,18 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
     private val brain = TasteBrain(db, engine)
     private val imageLoader = ImageLoader(appContext)
     private val settingsJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val castSender = SovereignCastSender(engine.httpClient) { remoteCmd ->
+        viewModelScope.launch(Dispatchers.Main) {
+            when (remoteCmd) {
+                "NEXT" -> skipNext()
+                "PREV" -> skipPrevious()
+                "ENDED" -> onTrackFinishedNaturally()
+                "STOP" -> _uiState.update { it.copy(activeCastTv = null, isPlaying = false) }
+                "STATE_PLAYING" -> _uiState.update { it.copy(isPlaying = true) }
+                "STATE_PAUSED" -> _uiState.update { it.copy(isPlaying = false) }
+            }
+        }
+    }
 
     private fun loadPersistedSettings(): AppSettings {
         val raw = db.getMeta("app_settings_v4", "")
@@ -261,22 +281,48 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // 100ms high-precision ticker for ultra-smooth Apple-Music-grade synced lyrics
+    // 100ms high-precision ticker for ultra-smooth lyrics (auto-switches to TV Cast polling when casting!)
     private fun startHighPrecisionProgressLoop() {
         viewModelScope.launch {
+            var castPollCounter = 0
             while (isActive) {
-                val player = SovereignPlaybackService.activeService?.player ?: mediaController
-                if (player != null) {
-                    val pos = player.currentPosition.coerceAtLeast(0L)
-                    val realDur = player.duration.takeIf { it > 0L }
-                        ?: ((_uiState.value.currentTrack?.durationSec ?: 0) * 1000L)
-                    _uiState.update { st ->
-                        if (st.positionMs != pos || st.durationMs != realDur || st.isPlaying != player.isPlaying) {
-                            st.copy(positionMs = pos, durationMs = realDur, isPlaying = player.isPlaying)
-                        } else st
+                val tv = _uiState.value.activeCastTv
+                if (tv != null) {
+                    if (castPollCounter % 4 == 0) {
+                        val st = castSender.pollTvStatus(tv)
+                        if (st != null) {
+                            _uiState.update { cur ->
+                                cur.copy(
+                                    positionMs = st.positionMs,
+                                    durationMs = st.durationMs.takeIf { it > 0L } ?: cur.durationMs,
+                                    isPlaying = st.playing,
+                                    isBuffering = st.preparing,
+                                )
+                            }
+                        }
+                    } else if (_uiState.value.isPlaying) {
+                        // Smooth 140ms local interpolation between TV status polls so squiggly bar & lyrics glide!
+                        _uiState.update { cur ->
+                            cur.copy(positionMs = (cur.positionMs + 140L).coerceAtMost(cur.durationMs.coerceAtLeast(1L)))
+                        }
                     }
+                    castPollCounter++
+                    delay(140L)
+                } else {
+                    castPollCounter = 0
+                    val player = SovereignPlaybackService.activeService?.player ?: mediaController
+                    if (player != null) {
+                        val pos = player.currentPosition.coerceAtLeast(0L)
+                        val realDur = player.duration.takeIf { it > 0L }
+                            ?: ((_uiState.value.currentTrack?.durationSec ?: 0) * 1000L)
+                        _uiState.update { st ->
+                            if (st.positionMs != pos || st.durationMs != realDur || st.isPlaying != player.isPlaying) {
+                                st.copy(positionMs = pos, durationMs = realDur, isPlaying = player.isPlaying)
+                            } else st
+                        }
+                    }
+                    delay(120L)
                 }
-                delay(120L)
             }
         }
     }
@@ -467,7 +513,38 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
     // 3. SEARCH & NAVIGATION
     // =========================================================================
     fun selectTab(tab: AppTab) = _uiState.update { it.copy(activeTab = tab, detailPage = null) }
-    fun setHomeFilter(f: HomeFilter) = _uiState.update { it.copy(homeFilter = f) }
+    fun setHomeFilter(f: HomeFilter) {
+        _uiState.update { it.copy(homeFilter = f) }
+        if (f == HomeFilter.MUSIC && _uiState.value.musicFreshTracks.isEmpty()) {
+            loadFreshMusicForYou()
+        }
+    }
+
+    private fun loadFreshMusicForYou() {
+        viewModelScope.launch {
+            val seeds = (db.getTopArtists(5).map { it.name } + listOf("trending hip hop r&b 2026", "late night vibes"))
+                .distinct()
+                .take(4)
+            val recentSeedId = _uiState.value.recentTracks.firstOrNull()?.id
+                ?: _uiState.value.likedTracks.firstOrNull()?.id
+            val fresh = withContext(Dispatchers.IO) {
+                coroutineScope {
+                    val artistJobs = seeds.map { q ->
+                        async { runCatching { engine.searchSongsByMood(q, limit = 10) }.getOrDefault(emptyList()) }
+                    }
+                    val radioJob = async {
+                        if (!recentSeedId.isNullOrBlank()) {
+                            runCatching { engine.fetchRelatedTracks(recentSeedId, limit = 18) }.getOrDefault(emptyList())
+                        } else emptyList()
+                    }
+                    (radioJob.await() + artistJobs.flatMap { it.await() }).distinctBy { it.id }
+                }
+            }
+            if (fresh.isNotEmpty()) {
+                _uiState.update { it.copy(musicFreshTracks = fresh) }
+            }
+        }
+    }
     fun setLibraryFilter(f: LibraryFilter) = _uiState.update { it.copy(libraryFilter = f) }
     fun toggleLibraryGrid() = _uiState.update { it.copy(libraryGridMode = !it.libraryGridMode) }
     fun toggleLibrarySort() = _uiState.update { it.copy(librarySortAlpha = !it.librarySortAlpha) }
@@ -728,18 +805,49 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
                     svc = SovereignPlaybackService.activeService
                     tries++
                 }
-                withContext(Dispatchers.Main) {
-                    svc?.let { activeSvc ->
-                        activeSvc.playStream(
-                            url = stream.url,
-                            headers = stream.headers,
-                            title = track.title,
-                            artist = track.artist,
-                            artworkUri = track.thumbnailUrl.ifBlank { null },
-                            mediaId = track.id,
-                        )
-                        val dspSt = activeSvc.applyAudioFx(_uiState.value.settings.audioFx)
-                        _uiState.update { it.copy(dspStatus = dspSt, audioCacheBytes = activeSvc.getCacheSizeBytes()) }
+                val activeTv = _uiState.value.activeCastTv
+                if (activeTv != null) {
+                    // Pause local phone ExoPlayer & stream straight to Xiaomi TV via Sovereign Cast!
+                    withContext(Dispatchers.Main) {
+                        SovereignPlaybackService.activeService?.player?.pause()
+                    }
+                    val ok = castSender.playOnTv(
+                        device = activeTv,
+                        track = track,
+                        stream = stream,
+                        positionMs = 0L,
+                        accentColorInt = _uiState.value.trackPalette.highlightAccent.toArgb(),
+                        lyricsPayload = _uiState.value.lyricsPayload,
+                        lyricsOffsetMs = savedOffset,
+                    )
+                    if (!ok) {
+                        showToast("Lost TV connection — playing locally")
+                        _uiState.update { it.copy(activeCastTv = null) }
+                        withContext(Dispatchers.Main) {
+                            svc?.playStream(
+                                url = stream.url,
+                                headers = stream.headers,
+                                title = track.title,
+                                artist = track.artist,
+                                artworkUri = track.thumbnailUrl.ifBlank { null },
+                                mediaId = track.id,
+                            )
+                        }
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        svc?.let { activeSvc ->
+                            activeSvc.playStream(
+                                url = stream.url,
+                                headers = stream.headers,
+                                title = track.title,
+                                artist = track.artist,
+                                artworkUri = track.thumbnailUrl.ifBlank { null },
+                                mediaId = track.id,
+                            )
+                            val dspSt = activeSvc.applyAudioFx(_uiState.value.settings.audioFx)
+                            _uiState.update { it.copy(dspStatus = dspSt, audioCacheBytes = activeSvc.getCacheSizeBytes()) }
+                        }
                     }
                 }
                 val badge = if (stream.fromCache) "${stream.codecLabel} · INSTANT" else stream.codecLabel
@@ -788,6 +896,10 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
             _uiState.update { it.copy(isLoadingLyrics = true) }
             val payload = lyricsEngine.fetchBestLyrics(track.title, track.artist, durationSec)
             _uiState.update { it.copy(lyricsPayload = payload, isLoadingLyrics = false) }
+            // Push synced lyrics straight to TV if currently casting!
+            _uiState.value.activeCastTv?.let { tv ->
+                castSender.syncLyricsToTv(tv, payload, _uiState.value.lyricsOffsetMs)
+            }
         }
     }
 
@@ -806,15 +918,30 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
         val next = (_uiState.value.lyricsOffsetMs + deltaMs).coerceIn(-15_000L, 15_000L)
         db.setLyricsOffsetMs(track, next)
         _uiState.update { it.copy(lyricsOffsetMs = next) }
+        _uiState.value.activeCastTv?.let { tv ->
+            viewModelScope.launch { castSender.syncOffsetToTv(tv, next) }
+        }
     }
 
     fun resetLyricsOffset() {
         val track = _uiState.value.currentTrack ?: return
         db.setLyricsOffsetMs(track, 0L)
         _uiState.update { it.copy(lyricsOffsetMs = 0L) }
+        _uiState.value.activeCastTv?.let { tv ->
+            viewModelScope.launch { castSender.syncOffsetToTv(tv, 0L) }
+        }
     }
 
     fun togglePlayPause() {
+        val activeTv = _uiState.value.activeCastTv
+        if (activeTv != null) {
+            val nextPlaying = !_uiState.value.isPlaying
+            _uiState.update { it.copy(isPlaying = nextPlaying) }
+            viewModelScope.launch {
+                if (nextPlaying) castSender.resumeOnTv(activeTv) else castSender.pauseOnTv(activeTv)
+            }
+            return
+        }
         val player = SovereignPlaybackService.activeService?.player ?: mediaController ?: return
         if (player.isPlaying) {
             player.pause()
@@ -826,9 +953,16 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun seekTo(ms: Long) {
+        val safe = ms.coerceAtLeast(0L)
+        val activeTv = _uiState.value.activeCastTv
+        if (activeTv != null) {
+            _uiState.update { it.copy(positionMs = safe) }
+            viewModelScope.launch { castSender.seekOnTv(activeTv, safe) }
+            return
+        }
         val player = SovereignPlaybackService.activeService?.player ?: mediaController ?: return
-        player.seekTo(ms.coerceAtLeast(0L))
-        _uiState.update { it.copy(positionMs = ms.coerceAtLeast(0L)) }
+        player.seekTo(safe)
+        _uiState.update { it.copy(positionMs = safe) }
     }
 
     fun skipNext() {
@@ -1297,7 +1431,118 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
         return Triple(full.dominant, full.mini, full.lyrics)
     }
 
+    // =========================================================================
+    // 8. SOVEREIGN CAST TO XIAOMI TV (ZERO-DEPENDENCY LAN CINEMA RELAY)
+    // =========================================================================
+    fun openCastSheet() {
+        _uiState.update { it.copy(castSheetOpen = true) }
+        scanForTvs()
+    }
+
+    fun closeCastSheet() = _uiState.update { it.copy(castSheetOpen = false) }
+
+    fun scanForTvs() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isScanningTvs = true) }
+            val found = castSender.discoverTvDevices(timeoutMs = 900)
+            _uiState.update { st ->
+                val merged = (found + listOfNotNull(st.activeCastTv)).distinctBy { it.ip }
+                st.copy(isScanningTvs = false, discoveredTvs = merged)
+            }
+        }
+    }
+
+    fun connectCastByIp(ip: String) {
+        val clean = ip.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isScanningTvs = true) }
+            val dev = castSender.probeTvAtIp(clean)
+            _uiState.update { it.copy(isScanningTvs = false) }
+            if (dev != null) {
+                connectCastTv(dev)
+            } else {
+                showToast("No Mono TV Cast receiver found at $clean")
+            }
+        }
+    }
+
+    fun connectCastTv(device: CastTvDevice) {
+        viewModelScope.launch {
+            val st = _uiState.value
+            val curTrack = st.currentTrack
+            val resumePos = st.positionMs.coerceAtLeast(0L)
+            withContext(Dispatchers.Main) {
+                SovereignPlaybackService.activeService?.player?.pause()
+            }
+            _uiState.update {
+                it.copy(
+                    activeCastTv = device,
+                    castSheetOpen = false,
+                    discoveredTvs = (it.discoveredTvs + device).distinctBy { d -> d.ip },
+                )
+            }
+            if (curTrack != null) {
+                showToast("Casting to ${device.name}...")
+                runCatching {
+                    val stream = engine.resolveAudioStream(curTrack.id, preferUltraHigh = st.ultraHighAudio)
+                    val ok = castSender.playOnTv(
+                        device = device,
+                        track = curTrack,
+                        stream = stream,
+                        positionMs = resumePos,
+                        accentColorInt = st.trackPalette.highlightAccent.toArgb(),
+                        lyricsPayload = st.lyricsPayload,
+                        lyricsOffsetMs = st.lyricsOffsetMs,
+                    )
+                    if (!ok) {
+                        _uiState.update { it.copy(activeCastTv = null) }
+                        showToast("Could not reach ${device.name}")
+                    }
+                }.onFailure {
+                    _uiState.update { it.copy(activeCastTv = null) }
+                    showToast("Cast error: ${it.message?.take(45)}")
+                }
+            } else {
+                showToast("Connected to ${device.name} — pick any song to cast!")
+            }
+        }
+    }
+
+    fun disconnectCastTv() {
+        val tv = _uiState.value.activeCastTv ?: return
+        val resumePos = _uiState.value.positionMs.coerceAtLeast(0L)
+        val curTrack = _uiState.value.currentTrack
+        _uiState.update { it.copy(activeCastTv = null, castSheetOpen = false) }
+        viewModelScope.launch {
+            castSender.stopOnTv(tv)
+            if (curTrack != null) {
+                runCatching {
+                    val stream = engine.resolveAudioStream(curTrack.id, preferUltraHigh = _uiState.value.ultraHighAudio)
+                    withContext(Dispatchers.Main) {
+                        SovereignPlaybackService.activeService?.playStream(
+                            url = stream.url,
+                            headers = stream.headers,
+                            title = curTrack.title,
+                            artist = curTrack.artist,
+                            artworkUri = curTrack.thumbnailUrl.ifBlank { null },
+                            mediaId = curTrack.id,
+                            startPositionMs = resumePos,
+                        )
+                    }
+                }
+            }
+        }
+        showToast("Disconnected from ${tv.name}")
+    }
+
+    fun adjustCastVolume(delta: Int) {
+        val tv = _uiState.value.activeCastTv ?: return
+        viewModelScope.launch { castSender.adjustTvVolume(tv, delta) }
+    }
+
     override fun onCleared() {
+        castSender.shutdown()
         mediaController?.release()
         super.onCleared()
     }

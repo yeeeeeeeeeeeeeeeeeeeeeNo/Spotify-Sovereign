@@ -163,15 +163,15 @@ fun SearchScreen(
             ) {
                 if (res.songs.isNotEmpty()) {
                     item {
-                        Text("Songs", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold)
+                        Text("Songs & Versions", color = palette.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold)
                     }
-                    items(res.songs.take(15), key = { "sr_${it.id}" }) { track ->
+                    items(res.songs.take(24), key = { "sr_${it.id}" }) { track ->
                         val isCurrent = state.currentTrack?.id == track.id
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
-                                .clickable { onPlayTrack(track, res.songs) }
+                                .clickable { onPlayTrack(track, res.songs + res.relatedSongs) }
                                 .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -188,7 +188,7 @@ fun SearchScreen(
                                         SpotifyEqualizerBars(isPlaying = state.isPlaying, barColor = palette.accent)
                                         Spacer(Modifier.width(6.dp))
                                     }
-                                    Text(track.title, color = if (isCurrent) palette.accent else Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(track.title, color = if (isCurrent) palette.accent else palette.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                                 Spacer(Modifier.height(2.dp))
                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -198,6 +198,42 @@ fun SearchScreen(
                                     }
                                     Text("Song · ${track.artist}", color = palette.textMuted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
+                            }
+                        }
+                    }
+                }
+
+                if (res.relatedSongs.isNotEmpty()) {
+                    item {
+                        Text("Similar Songs & Vibes", color = palette.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(top = 10.dp))
+                    }
+                    items(res.relatedSongs.take(14), key = { "srel_${it.id}" }) { track ->
+                        val isCurrent = state.currentTrack?.id == track.id
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onPlayTrack(track, res.relatedSongs) }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            AsyncImage(
+                                model = track.thumbnailUrl,
+                                contentDescription = track.title,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.size(50.dp).clip(RoundedCornerShape(6.dp)).background(palette.card),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (isCurrent) {
+                                        SpotifyEqualizerBars(isPlaying = state.isPlaying, barColor = palette.accent)
+                                        Spacer(Modifier.width(6.dp))
+                                    }
+                                    Text(track.title, color = if (isCurrent) palette.accent else palette.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                Spacer(Modifier.height(2.dp))
+                                Text("Similar · ${track.artist}", color = palette.textMuted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }

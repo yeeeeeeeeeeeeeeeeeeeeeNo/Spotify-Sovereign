@@ -33,6 +33,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Cast
+import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Pause
@@ -43,6 +45,9 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SpatialAudio
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.filled.VolumeDown
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -75,6 +80,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.spotify.sovereign.engine.CastTvDevice
 import com.spotify.sovereign.model.AppTab
 import com.spotify.sovereign.ui.SovereignUiState
 import com.spotify.sovereign.ui.SpotifyViewModel
@@ -103,11 +109,12 @@ fun MainScreen(viewModel: SpotifyViewModel) {
     }
 
     BackHandler(
-        enabled = state.ytLoginOpen || state.soundFxSheetOpen || state.settingsOpen || state.fullLyricsOpen ||
+        enabled = state.castSheetOpen || state.ytLoginOpen || state.soundFxSheetOpen || state.settingsOpen || state.fullLyricsOpen ||
             state.queueSheetOpen || state.nowPlayingOpen || state.profileDrawerOpen ||
             state.detailPage != null || state.activeTab != AppTab.HOME
     ) {
         when {
+            state.castSheetOpen -> viewModel.closeCastSheet()
             state.ytLoginOpen -> viewModel.closeYouTubeLogin()
             state.soundFxSheetOpen -> viewModel.setSoundFxSheet(false)
             state.settingsOpen -> viewModel.closeSettings()
@@ -139,6 +146,7 @@ fun MainScreen(viewModel: SpotifyViewModel) {
                     state = state,
                     onOpenProfile = { viewModel.setProfileDrawer(true) },
                     onOpenSettings = viewModel::openSettings,
+                    onOpenCast = viewModel::openCastSheet,
                     onSelectFilter = viewModel::setHomeFilter,
                     onSelectMusicMood = viewModel::selectMusicMood,
                     onClickCollection = viewModel::openCollection,
@@ -236,6 +244,7 @@ fun MainScreen(viewModel: SpotifyViewModel) {
                 onOpenQueue = { viewModel.setQueueSheet(true) },
                 onOpenFullLyrics = viewModel::openFullLyrics,
                 onOpenSoundFx = { viewModel.setSoundFxSheet(true) },
+                onOpenCast = viewModel::openCastSheet,
                 onCycleArtworkStyle = viewModel::cycleArtworkStyle,
             )
         }
@@ -379,6 +388,26 @@ fun MainScreen(viewModel: SpotifyViewModel) {
                     viewModel.setSoundFxSheet(false)
                     viewModel.openSettings()
                 },
+            )
+        }
+
+        // Sovereign Cast to Xiaomi TV Modal Sheet
+        AnimatedVisibility(visible = state.castSheetOpen, enter = fadeIn(), exit = fadeOut()) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.68f)).clickable { viewModel.closeCastSheet() })
+        }
+        AnimatedVisibility(
+            visible = state.castSheetOpen,
+            enter = slideInVertically(initialOffsetY = { it }),
+            exit = slideOutVertically(targetOffsetY = { it }),
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
+            SovereignCastSheet(
+                state = state,
+                onScan = viewModel::scanForTvs,
+                onConnectDevice = viewModel::connectCastTv,
+                onConnectByIp = viewModel::connectCastByIp,
+                onDisconnect = viewModel::disconnectCastTv,
+                onVolumeDelta = viewModel::adjustCastVolume,
             )
         }
 
@@ -724,5 +753,212 @@ private fun SovereignQueueSheet(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SovereignCastSheet(
+    state: SovereignUiState,
+    onScan: () -> Unit,
+    onConnectDevice: (CastTvDevice) -> Unit,
+    onConnectByIp: (String) -> Unit,
+    onDisconnect: () -> Unit,
+    onVolumeDelta: (Int) -> Unit,
+) {
+    val palette = SovereignTheme.colors
+    var manualIp by remember { mutableStateOf(state.activeCastTv?.ip ?: "192.168.1.8") }
+    val activeTv = state.activeCastTv
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+            .background(palette.surface)
+            .border(1.dp, palette.glassBorder, RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+            .navigationBarsPadding()
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+    ) {
+        Box(
+            Modifier
+                .align(Alignment.CenterHorizontally)
+                .width(40.dp)
+                .height(4.dp)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.28f))
+        )
+        Spacer(Modifier.height(14.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = if (activeTv != null) Icons.Filled.CastConnected else Icons.Filled.Cast,
+                contentDescription = null,
+                tint = if (activeTv != null) palette.accent else Color.White,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Sovereign Cast", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold)
+                Text(
+                    text = if (activeTv != null) "Connected to ${activeTv.name}" else "Cinema cover, synced lyrics & Dolby Audio on TV",
+                    color = if (activeTv != null) palette.accent else palette.textMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (state.isScanningTvs) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    color = palette.accent,
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                IconButton(onClick = onScan, modifier = Modifier.size(34.dp)) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "Rescan TVs", tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(20.dp))
+                }
+            }
+        }
+
+        if (activeTv != null) {
+            Spacer(Modifier.height(14.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(palette.accent.copy(alpha = 0.12f))
+                    .border(1.dp, palette.accent.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                    .padding(14.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Tv, contentDescription = null, tint = palette.accent, modifier = Modifier.size(24.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(activeTv.name, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${activeTv.ip}:${activeTv.port} · Live TV Remote Active", color = palette.textMuted, fontSize = 11.5.sp)
+                    }
+                    TextButton(onClick = onDisconnect) {
+                        Text("Disconnect", color = Color(0xFFFF6B6B), fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("TV Volume", color = Color.White.copy(alpha = 0.8f), fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .clickable { onVolumeDelta(-1) }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.VolumeDown, contentDescription = "Volume Down", tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .clickable { onVolumeDelta(1) }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.VolumeUp, contentDescription = "Volume Up", tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Text("Discovered TVs on Wi-Fi", color = palette.textMuted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+
+        if (state.discoveredTvs.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.White.copy(alpha = 0.04f))
+                    .padding(horizontal = 14.dp, vertical = 14.dp),
+            ) {
+                Text(
+                    text = if (state.isScanningTvs) "Scanning local network for Mono TV..." else "No TVs auto-detected yet. Tap refresh or connect by IP below.",
+                    color = palette.textMuted,
+                    fontSize = 12.5.sp,
+                )
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                state.discoveredTvs.forEach { tv ->
+                    val selected = activeTv?.ip == tv.ip
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) palette.accent.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.05f))
+                            .border(
+                                1.dp,
+                                if (selected) palette.accent.copy(alpha = 0.45f) else Color.White.copy(alpha = 0.08f),
+                                RoundedCornerShape(12.dp),
+                            )
+                            .clickable { onConnectDevice(tv) }
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.Tv, contentDescription = null, tint = if (selected) palette.accent else Color.White, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(tv.name, color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${tv.ip}:${tv.port}", color = palette.textMuted, fontSize = 12.sp)
+                        }
+                        Text(
+                            text = if (selected) "Active" else "Cast",
+                            color = if (selected) palette.accent else Color.White.copy(alpha = 0.85f),
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+        Spacer(Modifier.height(12.dp))
+        Text("Direct TV IP", color = palette.textMuted, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            OutlinedTextField(
+                value = manualIp,
+                onValueChange = { manualIp = it },
+                singleLine = true,
+                placeholder = { Text("192.168.1.8", fontSize = 13.sp) },
+                modifier = Modifier.weight(1f),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = palette.accent,
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.2f),
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                ),
+            )
+            Button(
+                onClick = { onConnectByIp(manualIp) },
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = Color.Black),
+                modifier = Modifier.height(52.dp),
+            ) {
+                Text("Connect", fontWeight = FontWeight.ExtraBold, fontSize = 13.5.sp)
+            }
+        }
+        Spacer(Modifier.height(6.dp))
     }
 }

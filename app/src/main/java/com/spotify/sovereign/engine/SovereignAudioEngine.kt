@@ -10,6 +10,8 @@ import com.spotify.sovereign.model.TrackItem
 import com.spotify.sovereign.model.YouTubeAccountProfile
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -390,87 +392,130 @@ class SovereignAudioEngine {
     }
 
     // =========================================================================
-    // 2. DIRECT YOUTUBE MUSIC SEARCH (STUDIO TRACKS FIRST!)
+    // 2. DIRECT YOUTUBE MUSIC SEARCH (EXACT + ALL VERSIONS + SIMILAR VIBES!)
     // =========================================================================
+    private val variantNoiseRegex = Regex(
+        """\b(slowed|ultra\s*slowed|super\s*slowed|sped\s*up|speed\s*up|reverb|and\s*reverb|\+\s*reverb|nightcore|remix|8d|bass\s*boosted|instrumental|acoustic|live|audio|lyrics)\b""",
+        RegexOption.IGNORE_CASE,
+    )
+
     suspend fun searchAll(query: String): SearchResults = withContext(Dispatchers.IO) {
-        val root = postWebRemix(
-            endpoint = "search",
-            extra = buildJsonObject { put("query", query) },
-        ) ?: return@withContext SearchResults(query)
+        val cleanQuery = query.trim()
+        val baseTitle = cleanQuery.replace(variantNoiseRegex, " ").replace(Regex("""\s+"""), " ").trim()
+        val hasVariantModifier = baseTitle.isNotBlank() && !baseTitle.equals(cleanQuery, ignoreCase = true)
+
+        val (root, directSongs, variantSongs) = coroutineScope {
+            val mainJob = async {
+                postWebRemix(
+                    endpoint = "search",
+                    extra = buildJsonObject { put("query", cleanQuery) },
+                )
+            }
+            val songsJob = async {
+                searchSongsByMood(cleanQuery, limit = 18)
+            }
+            val variantJob = async {
+                if (hasVariantModifier) {
+                    val v1 = async { searchSongsByMood("$baseTitle slowed sped up", limit = 14) }
+                    val v2 = async { searchSongsByMood(baseTitle, limit = 10) }
+                    (v1.await() + v2.await()).distinctBy { it.id }
+                } else {
+                    emptyList()
+                }
+            }
+            Triple(mainJob.await(), songsJob.await(), variantJob.await())
+        }
 
         val songs = mutableListOf<TrackItem>()
         val albums = mutableListOf<CollectionItem>()
         val artists = mutableListOf<CollectionItem>()
         val playlists = mutableListOf<CollectionItem>()
 
-        // Card shelf top result
-        findFirstObject(root, "musicCardShelfRenderer")?.let { card ->
-            val title = runText(card["title"])
-            val sub = runText(card["subtitle"]) ?: ""
-            val thumb = upgradeThumb(extractThumb(card["thumbnail"]))
-            val nav = card["title"]?.asObj()?.get("runs")?.asArr()?.firstOrNull()?.asObj()
-                ?.get("navigationEndpoint")?.asObj()
-            val vid = nav?.get("watchEndpoint")?.asObj()?.get("videoId")?.str()
-            val bid = nav?.get("browseEndpoint")?.asObj()?.get("browseId")?.str()
-            if (!title.isNullOrBlank()) {
-                if (vid != null) {
-                    songs.add(
-                        TrackItem(
-                            id = vid,
-                            title = title,
-                            artist = sub.substringAfter("•").trim().ifBlank { sub },
-                            thumbnailUrl = thumb,
+        if (root != null) {
+            findFirstObject(root, "musicCardShelfRenderer")?.let { card ->
+                val title = runText(card["title"])
+                val sub = runText(card["subtitle"]) ?: ""
+                val thumb = upgradeThumb(extractThumb(card["thumbnail"]))
+                val nav = card["title"]?.asObj()?.get("runs")?.asArr()?.firstOrNull()?.asObj()
+                    ?.get("navigationEndpoint")?.asObj()
+                val vid = nav?.get("watchEndpoint")?.asObj()?.get("videoId")?.str()
+                val bid = nav?.get("browseEndpoint")?.asObj()?.get("browseId")?.str()
+                if (!title.isNullOrBlank()) {
+                    if (vid != null) {
+                        songs.add(
+                            TrackItem(
+                                id = vid,
+                                title = title,
+                                artist = sub.substringAfter("•").trim().ifBlank { sub },
+                                thumbnailUrl = thumb,
+                            )
                         )
-                    )
-                } else if (bid != null) {
-                    val col = CollectionItem(
-                        id = bid,
-                        browseId = bid,
-                        title = title,
-                        subtitle = sub,
-                        thumbnailUrl = thumb,
-                        type = when {
-                            bid.startsWith("UC") -> "artist"
-                            bid.startsWith("MPRE") || bid.startsWith("OLAK") -> "album"
-                            else -> "playlist"
-                        },
-                    )
-                    when (col.type) {
-                        "artist" -> artists.add(col)
-                        "album" -> albums.add(col)
-                        else -> playlists.add(col)
+                    } else if (bid != null) {
+                        val col = CollectionItem(
+                            id = bid,
+                            browseId = bid,
+                            title = title,
+                            subtitle = sub,
+                            thumbnailUrl = thumb,
+                            type = when {
+                                bid.startsWith("UC") -> "artist"
+                                bid.startsWith("MPRE") || bid.startsWith("OLAK") -> "album"
+                                else -> "playlist"
+                            },
+                        )
+                        when (col.type) {
+                            "artist" -> artists.add(col)
+                            "album" -> albums.add(col)
+                            else -> playlists.add(col)
+                        }
+                    }
+                }
+            }
+
+            for (shelf in findAllObjects(root, "musicShelfRenderer")) {
+                val shelfTitle = runText(shelf["title"])?.lowercase().orEmpty()
+                val contents = shelf["contents"]?.asArr() ?: continue
+                for (el in contents) {
+                    val item = el.asObj()?.get("musicResponsiveListItemRenderer")?.asObj() ?: continue
+                    val track = parseResponsiveTrack(item)
+                    if (track != null && (shelfTitle.contains("song") || shelfTitle.isEmpty())) {
+                        songs.add(track)
+                        continue
+                    }
+                    val col = parseResponsiveCollection(item, shelfTitle)
+                    if (col != null) {
+                        when (col.type) {
+                            "artist" -> artists.add(col)
+                            "album" -> albums.add(col)
+                            "playlist" -> playlists.add(col)
+                            else -> if (track != null) songs.add(track)
+                        }
+                    } else if (track != null) {
+                        songs.add(track)
                     }
                 }
             }
         }
 
-        for (shelf in findAllObjects(root, "musicShelfRenderer")) {
-            val shelfTitle = runText(shelf["title"])?.lowercase().orEmpty()
-            val contents = shelf["contents"]?.asArr() ?: continue
-            for (el in contents) {
-                val item = el.asObj()?.get("musicResponsiveListItemRenderer")?.asObj() ?: continue
-                val track = parseResponsiveTrack(item)
-                if (track != null && (shelfTitle.contains("song") || shelfTitle.isEmpty())) {
-                    songs.add(track)
-                    continue
-                }
-                val col = parseResponsiveCollection(item, shelfTitle)
-                if (col != null) {
-                    when (col.type) {
-                        "artist" -> artists.add(col)
-                        "album" -> albums.add(col)
-                        "playlist" -> playlists.add(col)
-                        else -> if (track != null) songs.add(track)
-                    }
-                } else if (track != null) {
-                    songs.add(track)
-                }
-            }
+        // Exact matches first -> dedicated Songs tab hits -> all slowed/ultra-slowed/sped-up/original variants!
+        val mergedSongs = (songs + directSongs + variantSongs).distinctBy { it.id }
+
+        // Pull similar vibe tracks from the top matched song's YouTube Music radio graph!
+        val topId = mergedSongs.firstOrNull()?.id
+        val related = if (!topId.isNullOrBlank()) {
+            val seenIds = mergedSongs.map { it.id }.toSet()
+            runCatching { fetchRelatedTracks(topId, limit = 16) }
+                .getOrDefault(emptyList())
+                .filterNot { it.id in seenIds }
+                .distinctBy { it.id }
+        } else {
+            emptyList()
         }
 
         SearchResults(
-            query = query,
-            songs = songs.distinctBy { it.id },
+            query = cleanQuery,
+            songs = mergedSongs,
+            relatedSongs = related,
             albums = albums.distinctBy { it.browseId },
             artists = artists.distinctBy { it.browseId },
             playlists = playlists.distinctBy { it.browseId },
