@@ -7,6 +7,8 @@ import com.spotify.sovereign.model.OnboardingCandidate
 import com.spotify.sovereign.model.ResolvedStream
 import com.spotify.sovereign.model.SearchResults
 import com.spotify.sovereign.model.TrackItem
+import com.spotify.sovereign.model.YouTubeAccountProfile
+import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -143,6 +145,33 @@ class SovereignAudioEngine {
     private var cachedVisitorData: String = ""
     @Volatile
     private var visitorDataFetchedAtMs: Long = 0L
+
+    @Volatile
+    private var authCookie: String = ""
+
+    fun setAuthCookie(cookie: String?) {
+        authCookie = cookie?.trim().orEmpty()
+    }
+
+    fun hasAuthCookie(): Boolean = extractSapisid(authCookie) != null
+
+    private fun extractSapisid(cookie: String): String? {
+        if (cookie.isBlank()) return null
+        val map = cookie.split(";").mapNotNull { part ->
+            val idx = part.indexOf('=')
+            if (idx <= 0) null else part.substring(0, idx).trim() to part.substring(idx + 1).trim()
+        }.toMap()
+        return map["SAPISID"] ?: map["__Secure-3PAPISID"] ?: map["__Secure-1PAPISID"]
+    }
+
+    private fun buildSapisidAuthHeader(origin: String = "https://music.youtube.com"): String? {
+        val sapisid = extractSapisid(authCookie) ?: return null
+        val ts = System.currentTimeMillis() / 1000L
+        val raw = "$ts $sapisid $origin"
+        val digest = MessageDigest.getInstance("SHA-1").digest(raw.toByteArray(Charsets.UTF_8))
+        val hex = digest.joinToString("") { "%02x".format(it) }
+        return "SAPISIDHASH ${ts}_$hex"
+    }
 
     private fun ensureVisitorData(forceRefresh: Boolean = false): String {
         val now = System.currentTimeMillis()
@@ -660,9 +689,109 @@ class SovereignAudioEngine {
     }
 
     // =========================================================================
+    // 6. YOUTUBE MUSIC ACCOUNT SYNC (SAPISIDHASH AUTH — PROFILE / LIKES / PLAYLISTS)
+    // =========================================================================
+    suspend fun fetchYouTubeAccountProfile(): YouTubeAccountProfile? = withContext(Dispatchers.IO) {
+        if (!hasAuthCookie()) return@withContext null
+        val root = postWebRemix(
+            endpoint = "account/account_menu",
+            extra = buildJsonObject { put("deviceTheme", "DEVICE_THEME_SUPPORTED") },
+            authenticated = true,
+        ) ?: return@withContext null
+
+        val header = findFirstObject(root, "activeAccountHeaderRenderer") ?: return@withContext null
+        val name = runText(header["accountName"]) ?: "YouTube Music"
+        val handle = runText(header["channelHandle"]) ?: runText(header["email"]) ?: ""
+        val avatar = upgradeThumb(extractThumb(header["accountPhoto"]))
+        YouTubeAccountProfile(
+            name = name,
+            handle = handle,
+            avatarUrl = avatar,
+            signedIn = true,
+        )
+    }
+
+    suspend fun fetchYouTubeLikedSongs(limit: Int = 60): List<TrackItem> = withContext(Dispatchers.IO) {
+        if (!hasAuthCookie()) return@withContext emptyList()
+        val root = postWebRemix(
+            endpoint = "browse",
+            extra = buildJsonObject { put("browseId", "VLLM") },
+            authenticated = true,
+        ) ?: return@withContext emptyList()
+
+        findAllObjects(root, "musicResponsiveListItemRenderer")
+            .mapNotNull { parseResponsiveTrack(it) }
+            .distinctBy { it.id }
+            .take(limit)
+    }
+
+    suspend fun fetchYouTubePlaylists(): List<CollectionItem> = withContext(Dispatchers.IO) {
+        if (!hasAuthCookie()) return@withContext emptyList()
+        val root = postWebRemix(
+            endpoint = "browse",
+            extra = buildJsonObject { put("browseId", "FEmusic_liked_playlists") },
+            authenticated = true,
+        ) ?: return@withContext emptyList()
+
+        val out = mutableListOf<CollectionItem>()
+        for (card in findAllObjects(root, "musicTwoRowItemRenderer")) {
+            val title = runText(card["title"]) ?: continue
+            val subtitle = runText(card["subtitle"]) ?: "YouTube Music Playlist"
+            val thumb = upgradeThumb(extractThumb(card["thumbnailRenderer"]))
+            val browseId = card["navigationEndpoint"]?.asObj()?.get("browseEndpoint")?.asObj()?.get("browseId")?.str()
+                ?: continue
+            if (browseId == "VLLM" || browseId == "VLSE") continue
+            out.add(
+                CollectionItem(
+                    id = "ytpl_$browseId",
+                    browseId = browseId,
+                    title = title,
+                    subtitle = subtitle,
+                    thumbnailUrl = thumb,
+                    type = "playlist",
+                    accentHex = 0xFF7AA2F7,
+                )
+            )
+        }
+        out.distinctBy { it.browseId }
+    }
+
+    suspend fun syncTrackLikeToYouTube(videoId: String, liked: Boolean): Boolean = withContext(Dispatchers.IO) {
+        if (!hasAuthCookie()) return@withContext false
+        val ep = if (liked) "like/like" else "like/removelike"
+        val res = postWebRemix(
+            endpoint = ep,
+            extra = buildJsonObject {
+                putJsonObject("target") { put("videoId", videoId) }
+            },
+            authenticated = true,
+        )
+        res != null
+    }
+
+    suspend fun searchSongsByMood(query: String, limit: Int = 18): List<TrackItem> = withContext(Dispatchers.IO) {
+        val root = postWebRemix(
+            endpoint = "search",
+            extra = buildJsonObject {
+                put("query", query)
+                put("params", SONGS_SEARCH_PARAMS)
+            },
+        ) ?: return@withContext emptyList()
+
+        findAllObjects(root, "musicResponsiveListItemRenderer")
+            .mapNotNull { parseResponsiveTrack(it) }
+            .distinctBy { it.id }
+            .take(limit)
+    }
+
+    // =========================================================================
     // INTERNAL HTTP + JSON UTILITIES
     // =========================================================================
-    private fun postWebRemix(endpoint: String, extra: JsonObject): JsonObject? {
+    private fun postWebRemix(
+        endpoint: String,
+        extra: JsonObject,
+        authenticated: Boolean = false,
+    ): JsonObject? {
         val payload = buildJsonObject {
             putJsonObject("context") {
                 putJsonObject("client") {
@@ -675,7 +804,7 @@ class SovereignAudioEngine {
             extra.forEach { (k, v) -> put(k, v) }
         }.toString()
 
-        val req = Request.Builder()
+        val reqBuilder = Request.Builder()
             .url("$YT_MUSIC_BASE/$endpoint?prettyPrint=false")
             .post(payload.toRequestBody(JSON_MEDIA))
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36")
@@ -683,10 +812,20 @@ class SovereignAudioEngine {
             .header("Referer", "https://music.youtube.com/")
             .header("X-YouTube-Client-Name", "67")
             .header("X-YouTube-Client-Version", "1.20260401.01.00")
-            .build()
+
+        if (authenticated || hasAuthCookie()) {
+            val authHdr = buildSapisidAuthHeader("https://music.youtube.com")
+            if (authHdr != null && authCookie.isNotBlank()) {
+                reqBuilder
+                    .header("Cookie", authCookie)
+                    .header("Authorization", authHdr)
+                    .header("X-Origin", "https://music.youtube.com")
+                    .header("X-Goog-AuthUser", "0")
+            }
+        }
 
         return runCatching {
-            httpClient.newCall(req).execute().use { resp ->
+            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
                 if (!resp.isSuccessful) return@use null
                 json.parseToJsonElement(resp.body.string()).asObj()
             }

@@ -26,7 +26,8 @@ class MainActivity : ComponentActivity() {
             val state by viewModel.uiState.collectAsState()
             SpotifySovereignTheme(
                 themePreset = state.settings.visual.themePreset,
-                dynamicAlbumAccent = state.trackPalette.highlightAccent,
+                customColors = state.settings.visual.customColors,
+                trackPalette = state.trackPalette,
             ) {
                 MainScreen(viewModel = viewModel)
             }

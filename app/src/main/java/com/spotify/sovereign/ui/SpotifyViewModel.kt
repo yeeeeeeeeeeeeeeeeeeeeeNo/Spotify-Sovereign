@@ -22,15 +22,18 @@ import com.spotify.sovereign.engine.SovereignAudioEngine
 import com.spotify.sovereign.engine.SovereignLyricsEngine
 import com.spotify.sovereign.model.AppSettings
 import com.spotify.sovereign.model.AppTab
+import com.spotify.sovereign.model.AppThemePreset
 import com.spotify.sovereign.model.ArtworkStyle
 import com.spotify.sovereign.model.AudioFxSettings
 import com.spotify.sovereign.model.CollectionItem
+import com.spotify.sovereign.model.CustomThemeColors
 import com.spotify.sovereign.model.DetailPageData
 import com.spotify.sovereign.model.DspEngineStatus
 import com.spotify.sovereign.model.HomeFilter
 import com.spotify.sovereign.model.HomeShelf
 import com.spotify.sovereign.model.LibraryFilter
 import com.spotify.sovereign.model.LyricsPayload
+import com.spotify.sovereign.model.MusicMoodCategory
 import com.spotify.sovereign.model.OnboardingCandidate
 import com.spotify.sovereign.model.RepeatMode
 import com.spotify.sovereign.model.SearchResults
@@ -39,10 +42,12 @@ import com.spotify.sovereign.model.TasteDnaSnapshot
 import com.spotify.sovereign.model.TrackColorPalette
 import com.spotify.sovereign.model.TrackItem
 import com.spotify.sovereign.model.VisualSettings
+import com.spotify.sovereign.model.YouTubeAccountProfile
 import com.spotify.sovereign.playback.SovereignPlaybackService
 import com.spotify.sovereign.ui.theme.SpotifyColors
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import android.webkit.CookieManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -97,9 +102,15 @@ data class SovereignUiState(
     val queueSheetOpen: Boolean = false,
     val settingsOpen: Boolean = false,
     val soundFxSheetOpen: Boolean = false,
+    val ytLoginOpen: Boolean = false,
+    val isSyncingAccount: Boolean = false,
+    val ytAccount: YouTubeAccountProfile = YouTubeAccountProfile(),
+    val selectedMusicMood: MusicMoodCategory = MusicMoodCategory.FOR_YOU,
+    val moodSongsMap: Map<MusicMoodCategory, List<TrackItem>> = emptyMap(),
+    val isLoadingMusicMood: Boolean = false,
     val dominantColor: Color = SpotifyColors.DefaultAccent,
     val miniPlayerColor: Color = SpotifyColors.DefaultMiniBg,
-    val lyricsCardColor: Color = Color(0xFF6B1E35),
+    val lyricsCardColor: Color = Color(0xFF333645),
     val trackPalette: TrackColorPalette = TrackColorPalette(),
     val lyricsPayload: LyricsPayload = LyricsPayload(emptyList(), false, "None", 0),
     val isLoadingLyrics: Boolean = false,
@@ -123,13 +134,24 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
     private val settingsJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     private fun loadPersistedSettings(): AppSettings {
-        val raw = db.getMeta("app_settings_v3", "")
+        val raw = db.getMeta("app_settings_v4", "")
         if (raw.isBlank()) return AppSettings()
         return runCatching { settingsJson.decodeFromString<AppSettings>(raw) }.getOrDefault(AppSettings())
     }
 
     private fun persistSettings(s: AppSettings) {
-        runCatching { db.setMeta("app_settings_v3", settingsJson.encodeToString(s)) }
+        runCatching { db.setMeta("app_settings_v4", settingsJson.encodeToString(s)) }
+    }
+
+    private fun loadPersistedYouTubeAccount(): YouTubeAccountProfile {
+        val cookie = db.getMeta("yt_account_cookie", "")
+        if (cookie.isNotBlank()) {
+            engine.setAuthCookie(cookie)
+        }
+        val raw = db.getMeta("yt_account_profile", "")
+        if (raw.isBlank()) return YouTubeAccountProfile(signedIn = engine.hasAuthCookie())
+        return runCatching { settingsJson.decodeFromString<YouTubeAccountProfile>(raw) }
+            .getOrDefault(YouTubeAccountProfile(signedIn = engine.hasAuthCookie()))
     }
 
     private val _uiState = MutableStateFlow(
@@ -141,6 +163,7 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
             searchHistory = db.getSearchHistory(),
             ultraHighAudio = db.getMeta("ultra_high", "1") == "1",
             settings = loadPersistedSettings(),
+            ytAccount = loadPersistedYouTubeAccount(),
             tasteDna = brain.getDnaSnapshot(),
         )
     )
@@ -872,7 +895,8 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
 
     fun toggleLikeTrack(track: TrackItem) {
         val isLiked = _uiState.value.likedTracks.any { it.id == track.id }
-        brain.recordLike(track, liked = !isLiked)
+        val newLiked = !isLiked
+        brain.recordLike(track, liked = newLiked)
         val updatedLiked = db.getLikedTracks()
         _uiState.update { st ->
             val updatedDetail = if (st.detailPage?.type == "liked") {
@@ -884,7 +908,13 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
                 tasteDna = brain.getDnaSnapshot(),
             )
         }
-        showToast(if (isLiked) "Removed from Liked Songs" else "Added to Liked Songs · AI updated")
+        // 2-Way Sync with signed-in YouTube Music account!
+        if (_uiState.value.ytAccount.signedIn) {
+            viewModelScope.launch(Dispatchers.IO) {
+                engine.syncTrackLikeToYouTube(track.id, newLiked)
+            }
+        }
+        showToast(if (isLiked) "Removed from Liked Songs" else "Added to Liked Songs · Synced")
     }
 
     fun toggleUltraHighAudio() {
@@ -1004,6 +1034,108 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // =========================================================================
+    // 6. YOUTUBE MUSIC ACCOUNT AUTH + 2-WAY LIBRARY/LIKES/PLAYLISTS SYNC
+    // =========================================================================
+    fun openYouTubeLogin() {
+        _uiState.update { it.copy(ytLoginOpen = true, profileDrawerOpen = false) }
+    }
+
+    fun closeYouTubeLogin() {
+        _uiState.update { it.copy(ytLoginOpen = false) }
+    }
+
+    fun onYouTubeCookiesCaptured(cookie: String) {
+        db.setMeta("yt_account_cookie", cookie)
+        engine.setAuthCookie(cookie)
+        _uiState.update { it.copy(ytLoginOpen = false) }
+        syncYouTubeAccountNow(showSuccessToast = true)
+    }
+
+    fun syncYouTubeAccountNow(showSuccessToast: Boolean = true) {
+        if (!engine.hasAuthCookie()) {
+            openYouTubeLogin()
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSyncingAccount = true) }
+            runCatching {
+                val (profile, liked, playlists) = withContext(Dispatchers.IO) {
+                    coroutineScope {
+                        val p = async { engine.fetchYouTubeAccountProfile() }
+                        val l = async { engine.fetchYouTubeLikedSongs(limit = 60) }
+                        val pl = async { engine.fetchYouTubePlaylists() }
+                        Triple(p.await(), l.await(), pl.await())
+                    }
+                }
+                val finalProfile = profile ?: YouTubeAccountProfile(
+                    name = "YouTube Music",
+                    handle = "Connected",
+                    signedIn = true,
+                )
+                db.setMeta("yt_account_profile", settingsJson.encodeToString(finalProfile))
+
+                // Merge YouTube Liked Songs straight into local Liked Songs & Taste Brain
+                liked.forEach { t ->
+                    db.upsertTrackTelemetry(t, scoreDelta = 2.5, setLiked = true)
+                    db.updateArtistScore(t.artist, delta = 2.0, imageUrl = t.thumbnailUrl)
+                }
+                // Merge YouTube Playlists into Your Library
+                playlists.forEach { col ->
+                    db.saveCollection(col)
+                }
+
+                _uiState.update {
+                    it.copy(
+                        isSyncingAccount = false,
+                        ytAccount = finalProfile,
+                        likedTracks = db.getLikedTracks(),
+                        savedCollections = db.getSavedCollections(),
+                        tasteDna = brain.getDnaSnapshot(),
+                    )
+                }
+                if (showSuccessToast) {
+                    showToast("Synced ${finalProfile.name}: ${liked.size} likes · ${playlists.size} playlists")
+                }
+            }.onFailure { err ->
+                _uiState.update { it.copy(isSyncingAccount = false) }
+                showToast("Account sync error: ${err.message?.take(48) ?: "try again"}")
+            }
+        }
+    }
+
+    fun signOutYouTubeAccount() {
+        db.setMeta("yt_account_cookie", "")
+        db.setMeta("yt_account_profile", "")
+        engine.setAuthCookie(null)
+        runCatching {
+            CookieManager.getInstance().removeAllCookies(null)
+            CookieManager.getInstance().flush()
+        }
+        _uiState.update { it.copy(ytAccount = YouTubeAccountProfile(signedIn = false)) }
+        showToast("Signed out of YouTube Music")
+    }
+
+    // =========================================================================
+    // 7. HOME "MUSIC" TAB — PURE SONGS BY MOOD & CATEGORY
+    // =========================================================================
+    fun selectMusicMood(mood: MusicMoodCategory) {
+        _uiState.update { it.copy(selectedMusicMood = mood) }
+        if (mood == MusicMoodCategory.FOR_YOU || _uiState.value.moodSongsMap.containsKey(mood)) {
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingMusicMood = true) }
+            val tracks = runCatching { engine.searchSongsByMood(mood.query, limit = 20) }.getOrDefault(emptyList())
+            _uiState.update { st ->
+                st.copy(
+                    isLoadingMusicMood = false,
+                    moodSongsMap = st.moodSongsMap + (mood to tracks),
+                )
+            }
+        }
+    }
+
     fun showToast(msg: String) {
         toastJob?.cancel()
         toastJob = viewModelScope.launch {
@@ -1020,58 +1152,127 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
         val aurora: TrackColorPalette,
     )
 
+    /**
+     * Bulletproof Album-Art Color Extractor:
+     * - Scans up to 24 real swatches ranked by saturation + population (ZERO ugly green fallback!)
+     * - Detects pure black / monochrome / grayscale covers and outputs sleek Platinum Silver-White (#E6E8F0)
+     * - Boosts HSV luminance so Progress Bar, Switches, and Active UI ALWAYS pop vividly on every song!
+     */
     private suspend fun extractFullPalette(url: String): ExtractedColors? = withContext(Dispatchers.IO) {
         if (url.isBlank()) return@withContext null
         runCatching {
             val req = ImageRequest.Builder(appContext).data(url).build()
             val result = imageLoader.execute(req) as? SuccessResult ?: return@runCatching null
             val bmp: Bitmap = result.image.toBitmap().copy(Bitmap.Config.ARGB_8888, false)
-            val palette = Palette.from(bmp).generate()
-            val rawVibrant = Color(
-                palette.getVibrantColor(
-                    palette.getLightVibrantColor(palette.getDominantColor(0xFF7B244B.toInt()))
+            val palette = Palette.from(bmp).maximumColorCount(24).generate()
+
+            val hsv = FloatArray(3)
+            data class ScoredSwatch(val rgb: Int, val hue: Float, val sat: Float, val value: Float, val pop: Int)
+
+            val allSwatches = palette.swatches.map { sw ->
+                android.graphics.Color.colorToHSV(sw.rgb, hsv)
+                ScoredSwatch(sw.rgb, hsv[0], hsv[1], hsv[2], sw.population)
+            }
+
+            val colorfulSwatches = allSwatches.filter { it.sat >= 0.16f && it.value >= 0.12f }
+            val isMonochrome = colorfulSwatches.isEmpty()
+
+            if (isMonochrome) {
+                // Sleek Monochrome / Pure-Black Cover Palette (Zero ugly green fallback!)
+                val platinum = Color(0xFFE6E8F0)
+                val charcoalVibrant = Color(0xFF3E4250)
+                val obsidianDark = Color(0xFF191B22)
+                val slateMuted = Color(0xFF282B36)
+                return@runCatching ExtractedColors(
+                    dominant = Color(0xFF282B34),
+                    mini = Color(0xFF181A20),
+                    lyrics = Color(0xFF2D303A),
+                    aurora = TrackColorPalette(
+                        vibrant = charcoalVibrant,
+                        darkVibrant = obsidianDark,
+                        muted = slateMuted,
+                        highlightAccent = platinum,
+                        subtleBgTint = Color(0xFF08090C),
+                        isMonochrome = true,
+                    ),
+                )
+            }
+
+            // Pick best vivid accent swatch (prefers rich saturation + meaningful pixel area)
+            val primary = colorfulSwatches.maxByOrNull { sw ->
+                val satWeight = sw.sat * sw.sat
+                val brightWeight = if (sw.value > 0.25f) 1.2f else 0.7f
+                satWeight * brightWeight * kotlin.math.ln((sw.pop + 10).toDouble()).toFloat()
+            } ?: colorfulSwatches.first()
+
+            // Pick a secondary complementary/distinct hue swatch if present
+            val secondary = colorfulSwatches
+                .filter { sw ->
+                    val dh = kotlin.math.abs(sw.hue - primary.hue)
+                    val hueDist = kotlin.math.min(dh, 360f - dh)
+                    hueDist >= 28f
+                }
+                .maxByOrNull { it.sat * kotlin.math.ln((it.pop + 5).toDouble()).toFloat() }
+                ?: primary
+
+            // Build vivid readable Accent (high brightness V=0.84..0.98 so progress bar & pills POP!)
+            val accentRgb = android.graphics.Color.HSVToColor(
+                floatArrayOf(
+                    primary.hue,
+                    primary.sat.coerceIn(0.42f, 0.88f),
+                    primary.value.coerceIn(0.84f, 0.98f),
                 )
             )
-            val rawDark = Color(
-                palette.getDarkVibrantColor(
-                    palette.getDarkMutedColor(0xFF3E1228.toInt())
+            // Build rich Aurora Vibrant Orb
+            val vibrantRgb = android.graphics.Color.HSVToColor(
+                floatArrayOf(
+                    primary.hue,
+                    primary.sat.coerceIn(0.45f, 0.90f),
+                    primary.value.coerceIn(0.48f, 0.78f),
                 )
             )
-            val rawMuted = Color(
-                palette.getMutedColor(
-                    palette.getDarkMutedColor(0xFF281A3A.toInt())
+            // Build deep Velvet Dark Orb
+            val darkRgb = android.graphics.Color.HSVToColor(
+                floatArrayOf(
+                    primary.hue,
+                    primary.sat.coerceIn(0.40f, 0.85f),
+                    0.24f,
                 )
             )
-            val rawHighlight = Color(
-                palette.getLightVibrantColor(
-                    palette.getVibrantColor(0xFF1ED760.toInt())
+            // Build complementary Muted Orb
+            val mutedRgb = android.graphics.Color.HSVToColor(
+                floatArrayOf(
+                    secondary.hue,
+                    secondary.sat.coerceIn(0.32f, 0.72f),
+                    0.34f,
+                )
+            )
+            // Build ultra-deep Subtle Background Tint for Match Current Song theme
+            val bgTintRgb = android.graphics.Color.HSVToColor(
+                floatArrayOf(
+                    primary.hue,
+                    primary.sat.coerceIn(0.25f, 0.55f),
+                    0.075f,
                 )
             )
 
-            // Ensure vibrant highlight stays crisp and readable on dark OLED surfaces
-            val crispHighlight = Color(
-                red = rawHighlight.red.coerceIn(0.28f, 1f),
-                green = rawHighlight.green.coerceIn(0.28f, 1f),
-                blue = rawHighlight.blue.coerceIn(0.28f, 1f),
-                alpha = 1f,
-            )
-
+            val rawVibrant = Color(vibrantRgb)
             val dominant = Color(
-                (rawVibrant.red * 0.62f).coerceIn(0.06f, 0.72f),
-                (rawVibrant.green * 0.62f).coerceIn(0.06f, 0.72f),
-                (rawVibrant.blue * 0.62f).coerceIn(0.06f, 0.72f),
+                (rawVibrant.red * 0.65f).coerceIn(0.06f, 0.72f),
+                (rawVibrant.green * 0.65f).coerceIn(0.06f, 0.72f),
+                (rawVibrant.blue * 0.65f).coerceIn(0.06f, 0.72f),
                 1f,
             )
             val mini = Color(
-                (rawVibrant.red * 0.34f).coerceIn(0.05f, 0.40f),
-                (rawVibrant.green * 0.34f).coerceIn(0.05f, 0.40f),
-                (rawVibrant.blue * 0.34f).coerceIn(0.05f, 0.40f),
+                (rawVibrant.red * 0.36f).coerceIn(0.05f, 0.42f),
+                (rawVibrant.green * 0.36f).coerceIn(0.05f, 0.42f),
+                (rawVibrant.blue * 0.36f).coerceIn(0.05f, 0.42f),
                 1f,
             )
             val lyrics = Color(
-                (rawVibrant.red * 0.72f).coerceIn(0.12f, 0.76f),
-                (rawVibrant.green * 0.72f).coerceIn(0.12f, 0.76f),
-                (rawVibrant.blue * 0.72f).coerceIn(0.12f, 0.76f),
+                (rawVibrant.red * 0.74f).coerceIn(0.12f, 0.76f),
+                (rawVibrant.green * 0.74f).coerceIn(0.12f, 0.76f),
+                (rawVibrant.blue * 0.74f).coerceIn(0.12f, 0.76f),
                 1f,
             )
 
@@ -1081,9 +1282,11 @@ class SpotifyViewModel(application: Application) : AndroidViewModel(application)
                 lyrics = lyrics,
                 aurora = TrackColorPalette(
                     vibrant = rawVibrant,
-                    darkVibrant = rawDark,
-                    muted = rawMuted,
-                    highlightAccent = crispHighlight,
+                    darkVibrant = Color(darkRgb),
+                    muted = Color(mutedRgb),
+                    highlightAccent = Color(accentRgb),
+                    subtleBgTint = Color(bgTintRgb),
+                    isMonochrome = false,
                 ),
             )
         }.getOrNull()

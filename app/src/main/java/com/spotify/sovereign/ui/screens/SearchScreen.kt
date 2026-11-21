@@ -90,18 +90,27 @@ fun SearchScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(Brush.linearGradient(listOf(Color(0xFFFF6B4A), Color(0xFFD92B6B), Color(0xFF6B21A8))))
-                    .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape)
-                    .clickable(onClick = onOpenProfile),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("A", color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 13.5.sp)
+            if (state.ytAccount.signedIn && state.ytAccount.avatarUrl.isNotBlank()) {
+                AsyncImage(
+                    model = state.ytAccount.avatarUrl,
+                    contentDescription = "Account",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(34.dp).clip(CircleShape).border(1.4.dp, palette.accent, CircleShape).clickable(onClick = onOpenProfile),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(palette.accent, palette.accent.copy(alpha = 0.55f))))
+                        .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape)
+                        .clickable(onClick = onOpenProfile),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(state.ytAccount.name.take(1).uppercase().ifBlank { "S" }, color = Color.Black, fontWeight = FontWeight.Black, fontSize = 13.5.sp)
+                }
             }
-            Text("Search", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
+            Text("Search", color = palette.textPrimary, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
         }
 
         // Pure White Spotify Search Input

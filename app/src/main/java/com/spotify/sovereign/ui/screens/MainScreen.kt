@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Link
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SpatialAudio
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -101,11 +103,12 @@ fun MainScreen(viewModel: SpotifyViewModel) {
     }
 
     BackHandler(
-        enabled = state.soundFxSheetOpen || state.settingsOpen || state.fullLyricsOpen ||
+        enabled = state.ytLoginOpen || state.soundFxSheetOpen || state.settingsOpen || state.fullLyricsOpen ||
             state.queueSheetOpen || state.nowPlayingOpen || state.profileDrawerOpen ||
             state.detailPage != null || state.activeTab != AppTab.HOME
     ) {
         when {
+            state.ytLoginOpen -> viewModel.closeYouTubeLogin()
             state.soundFxSheetOpen -> viewModel.setSoundFxSheet(false)
             state.settingsOpen -> viewModel.closeSettings()
             state.fullLyricsOpen -> viewModel.closeFullLyrics()
@@ -137,7 +140,10 @@ fun MainScreen(viewModel: SpotifyViewModel) {
                     onOpenProfile = { viewModel.setProfileDrawer(true) },
                     onOpenSettings = viewModel::openSettings,
                     onSelectFilter = viewModel::setHomeFilter,
+                    onSelectMusicMood = viewModel::selectMusicMood,
                     onClickCollection = viewModel::openCollection,
+                    onPlayTrack = { t, q -> viewModel.playTrack(t, q) },
+                    onToggleLikeTrack = viewModel::toggleLikeTrack,
                 )
                 AppTab.SEARCH -> SearchScreen(
                     state = state,
@@ -253,7 +259,7 @@ fun MainScreen(viewModel: SpotifyViewModel) {
             )
         }
 
-        // Full-Featured Settings, Dolby Atmos EQ & Theme Studio Screen
+        // Full-Featured Settings, Account Sync, Dolby Atmos EQ & Theme Studio Screen
         AnimatedVisibility(
             visible = state.settingsOpen,
             enter = slideInHorizontally(initialOffsetX = { it }),
@@ -262,6 +268,9 @@ fun MainScreen(viewModel: SpotifyViewModel) {
             SettingsScreen(
                 state = state,
                 onBack = viewModel::closeSettings,
+                onOpenYouTubeLogin = viewModel::openYouTubeLogin,
+                onSyncYouTubeAccount = { viewModel.syncYouTubeAccountNow(true) },
+                onSignOutYouTubeAccount = viewModel::signOutYouTubeAccount,
                 onUpdateAudioFx = viewModel::updateAudioFx,
                 onSelectSoundProfile = viewModel::selectSoundProfile,
                 onUpdateEqBand = viewModel::updateCustomEqBand,
@@ -285,6 +294,18 @@ fun MainScreen(viewModel: SpotifyViewModel) {
             )
         }
 
+        // Built-In YouTube Music Account WebView Sign-In Screen
+        AnimatedVisibility(
+            visible = state.ytLoginOpen,
+            enter = slideInVertically(initialOffsetY = { it }),
+            exit = slideOutVertically(targetOffsetY = { it }),
+        ) {
+            YouTubeLoginScreen(
+                onClose = viewModel::closeYouTubeLogin,
+                onCookiesCaptured = viewModel::onYouTubeCookiesCaptured,
+            )
+        }
+
         // Slide-Out Profile & Taste DNA AI Brain Drawer
         AnimatedVisibility(visible = state.profileDrawerOpen, enter = fadeIn(), exit = fadeOut()) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.68f)).clickable { viewModel.setProfileDrawer(false) })
@@ -296,6 +317,11 @@ fun MainScreen(viewModel: SpotifyViewModel) {
         ) {
             TasteDnaProfileDrawer(
                 state = state,
+                onOpenYouTubeLogin = viewModel::openYouTubeLogin,
+                onSyncYouTubeAccount = {
+                    viewModel.setProfileDrawer(false)
+                    viewModel.syncYouTubeAccountNow(true)
+                },
                 onOpenSettings = viewModel::openSettings,
                 onOpenSoundFx = {
                     viewModel.setProfileDrawer(false)
@@ -500,7 +526,7 @@ private fun GlassNavTab(
     icon: @Composable (Boolean, Color) -> Unit,
 ) {
     val palette = SovereignTheme.colors
-    val tint = if (selected) Color.White else palette.textMuted
+    val tint = if (selected) palette.accent else palette.textMuted
     Column(
         modifier = modifier.fillMaxHeight().clickable(onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -515,6 +541,8 @@ private fun GlassNavTab(
 @Composable
 private fun TasteDnaProfileDrawer(
     state: SovereignUiState,
+    onOpenYouTubeLogin: () -> Unit,
+    onSyncYouTubeAccount: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSoundFx: () -> Unit,
     onRefreshAiFeed: () -> Unit,
@@ -522,6 +550,7 @@ private fun TasteDnaProfileDrawer(
     onOpenImport: () -> Unit,
 ) {
     val palette = SovereignTheme.colors
+    val yt = state.ytAccount
     Column(
         modifier = Modifier
             .fillMaxHeight()
@@ -533,14 +562,37 @@ private fun TasteDnaProfileDrawer(
             .padding(horizontal = 18.dp, vertical = 18.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            SpotifyLogoMark(size = 42.dp, circleColor = palette.accent)
+            if (yt.signedIn && yt.avatarUrl.isNotBlank()) {
+                AsyncImage(
+                    model = yt.avatarUrl,
+                    contentDescription = yt.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(44.dp).clip(CircleShape).border(1.5.dp, palette.accent, CircleShape),
+                )
+            } else {
+                SpotifyLogoMark(size = 42.dp, circleColor = palette.accent)
+            }
             Column {
-                Text("Spotify", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
-                Text("Sovereign v3.0 · Atmos Studio", color = palette.accent, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (yt.signedIn) yt.name.ifBlank { "YouTube Music" } else "Spotify Sovereign",
+                    color = palette.textPrimary,
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = if (yt.signedIn) yt.handle.ifBlank { "YT Music 2-Way Sync" } else "v4.0 · Atmos & Theme Studio",
+                    color = palette.accent,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
         Spacer(Modifier.height(16.dp))
-        HorizontalDivider(color = Color.White.copy(alpha = 0.10f))
+        HorizontalDivider(color = palette.glassBorder)
         Spacer(Modifier.height(14.dp))
 
         // Live Taste DNA Telemetry Card
@@ -559,12 +611,12 @@ private fun TasteDnaProfileDrawer(
             Spacer(Modifier.height(8.dp))
             Text(
                 text = "Vibe: ${state.tasteDna.currentTimeBucket}  ·  Plays: ${state.tasteDna.totalPlays}  ·  Skips Buried: ${state.tasteDna.totalSkipsBlocked}",
-                color = Color.White,
+                color = palette.textPrimary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = "Sound: ${state.settings.audioFx.profile.title} · Theme: ${state.settings.visual.themePreset.title}",
+                text = "Theme: ${state.settings.visual.themePreset.title} · Sound: ${state.settings.audioFx.profile.shortBadge}",
                 color = palette.textMuted,
                 fontSize = 11.5.sp,
                 maxLines = 1,
@@ -574,7 +626,7 @@ private fun TasteDnaProfileDrawer(
                 Spacer(Modifier.height(10.dp))
                 state.tasteDna.topArtists.take(4).forEach { a ->
                     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(a.name, color = Color.White, fontSize = 12.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(a.name, color = palette.textPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text("+${String.format(java.util.Locale.US, "%.1f", a.score)}", color = palette.accent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
@@ -583,21 +635,25 @@ private fun TasteDnaProfileDrawer(
 
         Spacer(Modifier.height(14.dp))
 
-        // Highlighted Settings & Sound Engine Buttons
+        if (yt.signedIn) {
+            DrawerActionRow(Icons.Filled.Sync, "Sync YouTube Music Library", palette.accent, onSyncYouTubeAccount)
+        } else {
+            DrawerActionRow(Icons.Filled.AccountCircle, "Sign in with YouTube Music", palette.accent, onOpenYouTubeLogin)
+        }
         DrawerActionRow(Icons.Filled.Settings, "Settings, Themes & 10-Band EQ", palette.accent, onOpenSettings)
         DrawerActionRow(Icons.Filled.SpatialAudio, "Dolby Atmos & Sound Profiles", palette.accent, onOpenSoundFx)
         Spacer(Modifier.height(4.dp))
-        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+        HorizontalDivider(color = palette.glassBorder)
         Spacer(Modifier.height(4.dp))
-        DrawerActionRow(Icons.Filled.Refresh, "Refresh AI Recommendations", Color.White, onRefreshAiFeed)
-        DrawerActionRow(Icons.Filled.Link, "Import Spotify Playlist Link", Color.White, onOpenImport)
-        DrawerActionRow(Icons.Filled.AutoAwesome, "Retrain AI (Pick 10 Artists)", Color.White, onRetrainAi)
+        DrawerActionRow(Icons.Filled.Refresh, "Refresh AI Recommendations", palette.textPrimary, onRefreshAiFeed)
+        DrawerActionRow(Icons.Filled.Link, "Import Spotify Playlist Link", palette.textPrimary, onOpenImport)
+        DrawerActionRow(Icons.Filled.AutoAwesome, "Retrain AI (Pick 10 Artists)", palette.textPrimary, onRetrainAi)
 
         Spacer(Modifier.weight(1f))
-        HorizontalDivider(color = Color.White.copy(alpha = 0.10f))
+        HorizontalDivider(color = palette.glassBorder)
         Spacer(Modifier.height(10.dp))
         Text(
-            text = "100% Sovereign Engine · 32-bit DynamicsProcessing DSP · Dolby 3D Spatial · 512MB Pre-Buffer Cache · Local SQLite AI",
+            text = "Spotify Sovereign v4.0 · YouTube Music 2-Way Sync · 32-bit Atmos DSP · Manual Color Studio",
             color = palette.textMuted,
             fontSize = 11.sp,
             lineHeight = 15.sp,
@@ -612,17 +668,18 @@ private fun DrawerActionRow(
     tint: Color,
     onClick: () -> Unit,
 ) {
+    val palette = SovereignTheme.colors
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(vertical = 12.dp, horizontal = 6.dp),
+            .padding(vertical = 11.dp, horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
-        Text(label, color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
+        Text(label, color = palette.textPrimary, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

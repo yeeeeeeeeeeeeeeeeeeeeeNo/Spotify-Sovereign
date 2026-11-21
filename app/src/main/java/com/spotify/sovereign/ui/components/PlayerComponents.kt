@@ -351,37 +351,43 @@ fun SquigglyProgressBar(
                 }
                 wavePath.lineTo(activeX, centerY)
 
-                // Soft luminous under-glow behind the wave
+                // Soft luminous under-glow behind the wave (true live accent color!)
                 drawPath(
                     path = wavePath,
-                    color = accentColor.copy(alpha = 0.30f),
-                    style = Stroke(width = trackStroke * 2.4f, cap = StrokeCap.Round, join = StrokeJoin.Round),
+                    color = accentColor.copy(alpha = 0.42f),
+                    style = Stroke(width = trackStroke * 2.6f, cap = StrokeCap.Round, join = StrokeJoin.Round),
                 )
-                // Crisp primary wave stroke
+                // Crisp vivid accent wave stroke (clearly changes with every song!)
                 drawPath(
                     path = wavePath,
                     brush = Brush.horizontalGradient(
-                        colors = listOf(accentColor.copy(alpha = 0.85f), Color.White),
+                        colors = listOf(accentColor, accentColor.copy(alpha = 0.94f)),
                         startX = padX,
                         endX = (activeX + 1f),
                     ),
                     style = Stroke(width = trackStroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
                 )
 
-                // Expressive Playhead Pill Thumb (vertical capsule like Android 15 / Spotify Pro)
-                val pillW = (if (compact) 4.dp else 4.8.dp).toPx() * thumbScale
+                // Expressive Playhead Pill Thumb tinted cleanly with luminous accent halo
+                val pillW = (if (compact) 4.2.dp else 5.0.dp).toPx() * thumbScale
                 val pillH = (if (compact) 14.dp else 18.dp).toPx() * thumbScale
-                // Thumb halo glow
                 drawCircle(
-                    color = Color.White.copy(alpha = if (isDragging) 0.35f else 0.18f),
-                    radius = pillH * 0.72f,
+                    color = accentColor.copy(alpha = if (isDragging) 0.45f else 0.28f),
+                    radius = pillH * 0.78f,
                     center = Offset(activeX, centerY),
                 )
                 drawRoundRect(
-                    color = Color.White,
+                    color = accentColor,
                     topLeft = Offset(activeX - pillW / 2f, centerY - pillH / 2f),
                     size = Size(pillW, pillH),
                     cornerRadius = CornerRadius(pillW / 2f, pillW / 2f),
+                )
+                // Subtle bright center specular line on the thumb
+                drawRoundRect(
+                    color = Color.White.copy(alpha = 0.65f),
+                    topLeft = Offset(activeX - pillW * 0.22f, centerY - pillH * 0.34f),
+                    size = Size(pillW * 0.44f, pillH * 0.68f),
+                    cornerRadius = CornerRadius(pillW / 4f, pillW / 4f),
                 )
             }
         }

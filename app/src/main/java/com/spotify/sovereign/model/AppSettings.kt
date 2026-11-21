@@ -15,11 +15,11 @@ enum class SoundProfile(
     val title: String,
     val shortBadge: String,
     val subtitle: String,
-    val bandsDb: List<Float>, // 10 bands (-10f..+10f)
-    val spatialWidth: Float,  // 0f..1f
-    val bassBoost: Float,     // 0f..1f
-    val clarityExciter: Float,// 0f..1f
-    val inputGainDb: Float,   // Mastering loudness lift (protected by brickwall limiter)
+    val bandsDb: List<Float>,
+    val spatialWidth: Float,
+    val bassBoost: Float,
+    val clarityExciter: Float,
+    val inputGainDb: Float,
     val multibandComp: Boolean,
     val atmosSpatial: Boolean,
 ) {
@@ -121,68 +121,57 @@ enum class SoundProfile(
     ),
 }
 
+/**
+ * Curated 4-Preset Theme Architecture:
+ * 1. Match Current Song (Dynamic album art extraction — sleek monochrome fallback on black covers)
+ * 2. AMOLED Black (True #000000 pure OLED)
+ * 3. Tokyo Night (Authentic #1A1B26 / #C0CAF5 / #7AA2F7)
+ * 4. Custom (Manual Background / Foreground / Accent hex & color picker studio!)
+ */
 @Serializable
 enum class AppThemePreset(
     val title: String,
     val subtitle: String,
-    val accentHex: Long,
     val backgroundHex: Long,
-    val surfaceHex: Long,
-    val cardHex: Long,
-    val isPureOled: Boolean = false,
-    val isDynamicAlbum: Boolean = false,
+    val foregroundHex: Long,
+    val accentHex: Long,
 ) {
-    SPOTIFY_OBSIDIAN(
-        title = "Spotify Obsidian",
-        subtitle = "Signature green on velvet dark",
-        accentHex = 0xFF1ED760,
-        backgroundHex = 0xFF0A0A0C,
-        surfaceHex = 0xFF141418,
-        cardHex = 0xFF1C1C22,
+    MATCH_CURRENT_SONG(
+        title = "Match Current Song",
+        subtitle = "Live colors extracted from every track",
+        backgroundHex = 0xFF07070A,
+        foregroundHex = 0xFFF4F5F8,
+        accentHex = 0xFFE6E8F0,
     ),
-    AMOLED_PURE(
-        title = "AMOLED Pitch Black",
-        subtitle = "True #000000 OLED contrast",
-        accentHex = 0xFF1ED760,
+    AMOLED_BLACK(
+        title = "AMOLED Black",
+        subtitle = "True #000000 pitch-black OLED",
         backgroundHex = 0xFF000000,
-        surfaceHex = 0xFF0A0A0C,
-        cardHex = 0xFF121216,
-        isPureOled = true,
-    ),
-    MIDNIGHT_SAPPHIRE(
-        title = "Midnight Sapphire",
-        subtitle = "Deep ocean navy · electric cyan",
-        accentHex = 0xFF38BDF8,
-        backgroundHex = 0xFF060B14,
-        surfaceHex = 0xFF0D1524,
-        cardHex = 0xFF131F33,
-    ),
-    CRIMSON_VELVET(
-        title = "Crimson Velvet",
-        subtitle = "Nocturne burgundy · neon rose",
-        accentHex = 0xFFFF3B6B,
-        backgroundHex = 0xFF11060A,
-        surfaceHex = 0xFF1C0C12,
-        cardHex = 0xFF26121A,
-    ),
-    ROYAL_AMETHYST(
-        title = "Royal Amethyst",
-        subtitle = "Obsidian purple · vivid orchid",
-        accentHex = 0xFFA855F7,
-        backgroundHex = 0xFF0B0714,
-        surfaceHex = 0xFF150E24,
-        cardHex = 0xFF1E1533,
-    ),
-    DYNAMIC_ALBUM(
-        title = "Dynamic Album Aura",
-        subtitle = "Accent adapts live to every song",
+        foregroundHex = 0xFFF4F4F6,
         accentHex = 0xFF1ED760,
-        backgroundHex = 0xFF08080B,
-        surfaceHex = 0xFF131319,
-        cardHex = 0xFF1B1B23,
-        isDynamicAlbum = true,
+    ),
+    TOKYO_NIGHT(
+        title = "Tokyo Night",
+        subtitle = "Deep indigo · periwinkle · electric blue",
+        backgroundHex = 0xFF1A1B26,
+        foregroundHex = 0xFFC0CAF5,
+        accentHex = 0xFF7AA2F7,
+    ),
+    CUSTOM(
+        title = "Custom",
+        subtitle = "Pick your own Background, Foreground & Accent",
+        backgroundHex = 0xFF000000,
+        foregroundHex = 0xFF967ADB,
+        accentHex = 0xFFFFC799,
     ),
 }
+
+@Serializable
+data class CustomThemeColors(
+    val backgroundHex: Long = 0xFF000000,
+    val foregroundHex: Long = 0xFF967ADB,
+    val accentHex: Long = 0xFFFFC799,
+)
 
 @Serializable
 enum class ArtworkStyle(val title: String, val subtitle: String) {
@@ -216,7 +205,8 @@ data class AudioFxSettings(
 
 @Serializable
 data class VisualSettings(
-    val themePreset: AppThemePreset = AppThemePreset.SPOTIFY_OBSIDIAN,
+    val themePreset: AppThemePreset = AppThemePreset.MATCH_CURRENT_SONG,
+    val customColors: CustomThemeColors = CustomThemeColors(),
     val artworkStyle: ArtworkStyle = ArtworkStyle.HERO_SQUIRCLE,
     val squigglyProgressBar: Boolean = true,
     val ambientAuroraMesh: Boolean = true,
@@ -231,11 +221,38 @@ data class AppSettings(
     val visual: VisualSettings = VisualSettings(),
 )
 
+@Serializable
+data class YouTubeAccountProfile(
+    val name: String = "",
+    val handle: String = "",
+    val avatarUrl: String = "",
+    val signedIn: Boolean = false,
+)
+
+enum class MusicMoodCategory(val label: String, val query: String) {
+    FOR_YOU("For You", ""),
+    LATE_NIGHT("Late Night", "late night dark r&b moody chill songs"),
+    HYPE("Hype & Trap", "hype rap trap bass banger songs"),
+    CHILL("Chill & Soul", "chill alternative r&b smooth songs"),
+    ELECTRONIC("Electronic", "electronic synthwave house dance songs"),
+    INDIE("Indie & Alt", "indie alternative dream pop songs"),
+    THROWBACK("Throwbacks", "iconic 2000s 2010s hip hop pop classics"),
+}
+
+data class SongCategoryBlock(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val songs: List<TrackItem>,
+)
+
 data class TrackColorPalette(
-    val vibrant: Color = Color(0xFF7B244B),
-    val darkVibrant: Color = Color(0xFF3E1228),
-    val muted: Color = Color(0xFF281A3A),
-    val highlightAccent: Color = Color(0xFF1ED760),
+    val vibrant: Color = Color(0xFF424656),
+    val darkVibrant: Color = Color(0xFF1A1C24),
+    val muted: Color = Color(0xFF232530),
+    val highlightAccent: Color = Color(0xFFE6E8F0),
+    val subtleBgTint: Color = Color(0xFF0A0B0F),
+    val isMonochrome: Boolean = true,
 )
 
 data class DspEngineStatus(
